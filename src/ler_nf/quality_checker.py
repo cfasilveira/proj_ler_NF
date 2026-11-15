@@ -45,6 +45,11 @@ class QualityChecker:
     Envolve ``imageguard.validate`` e devolve um resultado
     estruturado com mensagem em linguagem natural para o usuário.
 
+    Avisos não bloqueiam a foto: artefatos de compressão, fundo
+    branco superexposto e bordas cortadas são normais em fotos de
+    documentos. Bloqueiam apenas sinais que tornam o texto
+    ilegível (blur, ruído, subexposição, resolução).
+
     Exemplo:
         >>> checker = QualityChecker()
         >>> resultado = checker.check("foto.jpg")
@@ -52,8 +57,15 @@ class QualityChecker:
         True
     """
 
-    def __init__(self, thresholds: dict[str, float] | None = None):
+    AVISOS_PADRAO = ("compressed", "overexposed", "clipped", "bad_exposure")
+
+    def __init__(
+        self,
+        thresholds: dict[str, float] | None = None,
+        bloquear: "tuple[str, ...] | None" = None,
+    ):
         self._thresholds = thresholds
+        self._bloquear = bloquear if bloquear is not None else self.AVISOS_PADRAO
 
     def check(self, path: "str") -> QualityCheckResult:
         try:
@@ -72,17 +84,27 @@ class QualityChecker:
         except Exception as exc:
             logger.exception("Falha inesperada na análise de %s", path)
             raise QualityCheckError(f"Falha inesperada na análise de qualidade: {exc}") from exc
-        mensagem = None if resultado.ok else traduzir_motivo(resultado.reason, resultado.issues)
+        ok, mensagem = self._avaliar(resultado)
         logger.info(
             "Qualidade de %s: ok=%s score=%.2f reason=%s",
             path,
-            resultado.ok,
+            ok,
             resultado.score,
             resultado.reason,
         )
-        return QualityCheckResult(
-            ok=resultado.ok,
-            score=float(resultado.score),
-            reason=resultado.reason,
-            message=mensagem,
-        )
+        return QualityCheckResult(ok=ok, score=float(resultado.score), reason=resultado.reason, message=mensagem)
+
+    def _avaliar(self, resultado) -> "tuple[bool, str | None]":
+        issues = [i.lower() for i in (resultado.issues or [])]
+        if resultado.reason:
+            issues.append(resultado.reason.lower())
+        bloqueios = [
+            issue for issue in issues
+            if not any(aviso in issue for aviso in self._bloquear)
+        ]
+        if resultado.ok:
+            return True, None
+        if not bloqueios:
+            logger.debug("Somente avisos de qualidade (compressão): aceito com score %.2f", resultado.score)
+            return True, None
+        return False, traduzir_motivo(bloqueios[0], bloqueios[1:])

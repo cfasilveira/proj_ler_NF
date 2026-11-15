@@ -124,6 +124,14 @@ def test_extractor_parse_money():
     assert parse("sem valor") is None
 
 
+def test_extractor_cnpj_valido():
+    validar = NfseExtractor._cnpj_valido
+    assert validar("11.222.333/0001-81")
+    assert not validar("11.222.333/0001-82")
+    assert not validar("11111111111111")
+    assert not validar("1234")
+
+
 def test_exporter_formatos(tmp_path):
     exporter = DataExporter(output_dir=tmp_path)
     dados = ExtractionResult(

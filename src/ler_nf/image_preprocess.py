@@ -101,13 +101,55 @@ class ImagePreprocessor:
     def _estimar_angulo(cinza: np.ndarray) -> float | None:
         suavizada = cv2.GaussianBlur(cinza, (5, 5), 0)
         _, binaria = cv2.threshold(suavizada, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        angulo = ImagePreprocessor._angulo_por_hough(binaria)
+        if angulo is None:
+            angulo = ImagePreprocessor._angulo_por_retangulo(binaria)
+        return angulo
+
+    @staticmethod
+    def _angulo_por_hough(binaria: np.ndarray) -> float | None:
+        altura, largura = binaria.shape
+        linhas = cv2.HoughLinesP(
+            binaria,
+            rho=1,
+            theta=np.pi / 180,
+            threshold=150,
+            minLineLength=max(120, largura // 8),
+            maxLineGap=20,
+        )
+        if linhas is None or len(linhas) == 0:
+            return None
+        angulos = []
+        for linha in linhas.reshape(-1, 4):
+            x1, y1, x2, y2 = linha
+            dx, dy = x2 - x1, y2 - y1
+            comprimento = float(np.hypot(dx, dy))
+            if comprimento == 0:
+                continue
+            ang = float(np.degrees(np.arctan2(dy, dx)))
+            if ang > 45:
+                ang -= 90
+            elif ang < -45:
+                ang += 90
+            if abs(ang) <= 15:
+                angulos.append((comprimento, ang))
+        if not angulos:
+            return None
+        total = sum(c for c, _ in angulos)
+        angulo_ponderado = sum(c * a for c, a in angulos) / total
+        logger.debug("Ângulo por Hough: %.2f (%d linhas)", angulo_ponderado, len(angulos))
+        return angulo_ponderado
+
+    @staticmethod
+    def _angulo_por_retangulo(binaria: np.ndarray) -> float | None:
         coords = cv2.findNonZero(binaria)
         if coords is None:
             return None
-        retângulo = cv2.minAreaRect(coords)
-        angulo = retângulo[2]
+        angulo = cv2.minAreaRect(coords)[2]
         if angulo > 45:
             angulo -= 90
+        elif angulo < -45:
+            angulo += 90
         return angulo
 
     @staticmethod

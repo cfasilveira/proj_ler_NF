@@ -110,5 +110,10 @@ uv run pytest -v
 - **Calibração**: limiar de Hamming (padrão 12), limiares do `imageguard`
   (parâmetro `quality_thresholds` do pipeline) e âncoras do extrator devem
   ser calibrados com amostras reais de NFS-e do município-alvo.
+- **M1 para fotos de documentos**: o `QualityChecker` usa política própria
+  — compressão, fundo branco superexposto e bordas cortadas viram aviso
+  (não bloqueiam); blur, ruído, subexposição e baixa resolução bloqueiam.
+  CNPJ é validado por dígito verificador (mod-11); CNPJ inválido recebe
+  confiança 0.5 para revisão humana na GUI.
 - **Drag-and-drop** na GUI: depende de `tkinterdnd2` (fora do MVP).
 - **Autenticação (M6)**: adiada para a fase multiusuário.

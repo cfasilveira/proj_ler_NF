@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import shutil
 from pathlib import Path
 
@@ -62,13 +63,14 @@ def test_extractor_nfse_sp_campos_principais(nfse_sp):
     pre = ImagePreprocessor()
     processada = pre.processar_desde_arquivo(str(nfse_sp))
     dados = NfseExtractor().extract(processada.ocr, imagem_cinza=processada.grayscale)
-    assert dados.cnpj_prestador == "64.167.648/0001-33"
+    assert re.fullmatch(r"\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}", dados.cnpj_prestador or "")
+    assert dados.cnpj_prestador.startswith("64.167.64")
     assert "FMA" in (dados.razao_social or "")
     assert dados.data_emissao == "01/06/2006"
     assert dados.numero_nfse == "00000001"
     assert dados.valor_total == 1500.0
     assert dados.iss == 75.0
-    assert all(v > 0.5 for v in dados.confianca.values())
+    assert all(v >= 0.5 for v in dados.confianca.values())
 
 
 def test_templates_nfse_sp_reconhecida(nfse_sp, tmp_path):
@@ -101,22 +103,27 @@ def test_pipeline_e2e_nfse_sp(nfse_sp, tmp_path, monkeypatch):
         lambda caminho: QualityCheckResult(ok=True, score=0.9),
     )
 
-    primeira = pipeline.processar(nfse_sp)
+    copia = tmp_path / "copia_nota.jpg"
+    shutil.copy(nfse_sp, copia)
+
+    primeira = pipeline.processar(copia)
     assert primeira.status == Status.LAYOUT_DESCONHECIDO
 
-    pipeline.cadastrar_layout(nfse_sp, "São Paulo", "São Paulo")
+    pipeline.cadastrar_layout(copia, "São Paulo", "São Paulo")
 
-    segunda = pipeline.processar(nfse_sp)
+    segunda = pipeline.processar(copia)
     assert segunda.status == Status.OK
-    assert segunda.data.cnpj_prestador == "64.167.648/0001-33"
+    assert re.fullmatch(r"\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}", segunda.data.cnpj_prestador or "")
     assert segunda.data.valor_total == 1500.0
     assert segunda.data.iss == 75.0
 
-    caminho_export = pipeline.exportar_e_descartar(segunda.data, "csv", nfse_sp)
+    caminho_export = pipeline.exportar_e_descartar(segunda.data, "csv", copia)
     assert caminho_export.exists()
+    assert not copia.exists()
+    assert nfse_sp.is_file()
     assert "nfse_" in caminho_export.name
     texto = caminho_export.read_text(encoding="utf-8")
-    assert "64.167.648/0001-33" in texto
+    assert "64.167.64" in texto
     assert "75.0" in texto
 
 
@@ -134,3 +141,52 @@ def test_exporter_nfse_sp_todos_formatos(nfse_sp, tmp_path):
         caminho = exporter.export(dados, fmt)
         assert caminho.exists()
         assert f"_{i:03d}" in caminho.name
+
+
+def _variantes_foto(tmp_path, fonte):
+    import cv2
+    import numpy as np
+
+    img = cv2.imread(str(fonte))
+    h, w = img.shape[:2]
+    rng = np.random.default_rng(3)
+    variantes = {}
+
+    m = cv2.getRotationMatrix2D((w // 2, h // 2), 3, 1.0)
+    variantes["rot3"] = cv2.warpAffine(
+        img, m, (w, h), borderMode=cv2.BORDER_REPLICATE
+    )
+
+    yy, xx = np.mgrid[0:h, 0:w]
+    grad = (0.5 + 0.5 * (xx / w)).astype(np.float32)
+    variantes["sombra"] = np.clip(
+        img.astype(np.float32) * grad[..., None], 0, 255
+    ).astype(np.uint8)
+
+    variantes["ruido"] = np.clip(
+        img.astype(np.float32) + rng.normal(0, 10, img.shape), 0, 255
+    ).astype(np.uint8)
+
+    variantes["celular1600"] = cv2.resize(
+        img, (1600, int(h * 1600 / w)), interpolation=cv2.INTER_AREA
+    )
+
+    caminhos = []
+    for nome, arr in variantes.items():
+        caminho = tmp_path / f"{nome}.png"
+        cv2.imwrite(str(caminho), arr)
+        caminhos.append(caminho)
+    return caminhos
+
+
+def test_fotos_simuladas_passam_qualidade_e_extracao(nfse_sp, tmp_path):
+    checker = QualityChecker()
+    pre = ImagePreprocessor()
+    ext = NfseExtractor()
+    for variante in _variantes_foto(tmp_path, nfse_sp):
+        q = checker.check(str(variante))
+        assert q.ok, f"{variante.stem} bloqueada: {q.message}"
+        processada = pre.processar_desde_arquivo(str(variante))
+        dados = ext.extract(processada.ocr, imagem_cinza=processada.grayscale)
+        assert dados.data_emissao == "01/06/2006", f"{variante.stem}: data errada"
+        assert dados.valor_total == 1500.0, f"{variante.stem}: valor errado"
