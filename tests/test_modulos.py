@@ -42,6 +42,15 @@ def test_file_guard_rejeita_arquivo_inexistente(guard, tmp_path):
     assert resultado.error_code == "arquivo_inexistente"
 
 
+def test_file_guard_aceita_avif(tmp_path):
+    caminho = tmp_path / "nota.avif"
+    imagem_ruido(tmp_path / "origem.png")
+    Image.open(tmp_path / "origem.png").save(caminho, format="AVIF")
+    resultado = FileGuard().validate(str(caminho))
+    assert resultado.ok, f"AVIF rejeitado: {resultado.error_code}"
+    assert resultado.mime_type.startswith("image/")
+
+
 def test_quality_checker_traducoes():
     assert "tremida" in traduzir_motivo("blurry").lower() or "tremida" in traduzir_motivo("blur")
     assert "escura" in traduzir_motivo("underexposed").lower()

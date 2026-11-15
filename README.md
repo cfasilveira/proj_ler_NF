@@ -21,7 +21,7 @@ Autenticação (M6) adiada para a fase multiusuário.
 | Papel | Biblioteca |
 |---|---|
 | Qualidade de imagem | `imageguard` |
-| Segurança de arquivo | `safeuploads` |
+| Segurança de arquivo | `safeuploads` (config estendida: PNG, JPEG, WebP, AVIF, HEIF/HEIC — AVIF/HEIC dependem de fallback Pillow) |
 | Hash perceptual | `ImageHash` |
 | OCR | `pytesseract` (Tesseract + `por`) |
 | Pré-processamento | `opencv-python-headless` |
