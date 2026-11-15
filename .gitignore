@@ -1,6 +1,7 @@
 # Dados locais
 data/
 downloads/
+imagens_NF/
 *.sqlite
 *.sqlite3
 
