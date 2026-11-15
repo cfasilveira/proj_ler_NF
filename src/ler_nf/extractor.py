@@ -15,14 +15,16 @@ from .errors import LeNfError
 logger = logging.getLogger(__name__)
 
 _CNPJ_RE = re.compile(r"\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2}")
-_DATA_RE = re.compile(r"\d{2}/\d{2}/\d{4}")
-_NUMERO_RE = re.compile(r"\b(\d{1,6})\s*/\s*(\d{2,6})\b")
+_DATA_RE = re.compile(r"\b\d{1,2}/\d{1,2}/\d{4}\b")
+_NUMERO_RE = re.compile(r"\b(\d{1,9})\s*/\s*(\d{2,9})\b")
+_NUMERO_SO_RE = re.compile(r"\b\d{5,9}\b")
 _MONEY_RE = re.compile(r"(?:R\$)?\s*(\d{1,3}(?:\.\d{3})+,\d{2}|\d+,\d{2})")
+_ANCORA_ISS_RE = re.compile(r"\bISS\b", re.IGNORECASE)
 
 _ANCORAS_VALOR_TOTAL = ("VALOR TOTAL", "TOTAL DA NOTA", "VALOR LIQUIDO", "VALOR LÍQUIDO", "TOTAL")
 _ANCORAS_RAZAO = ("RAZAO SOCIAL", "RAZÃO SOCIAL", "PRESTADOR")
 _ANCORAS_DATA = ("DATA EMISSAO", "DATA DE EMISSÃO", "DATA EMISSÃO", "DATA")
-_ANCORAS_NUMERO = ("NUMERO", "NÚMERO", "Nº", "N°")
+_ANCORAS_NUMERO = ("NUMERO DA NOTA", "NÚMERO DA NOTA", "NUMERO", "NÚMERO", "Nº", "N°")
 _ANCORAS_ISS = ("ISS",)
 
 
@@ -37,13 +39,24 @@ class _Linha:
     topo: int
 
 
+@dataclass
+class _Palavra:
+    texto: str
+    confianca: float
+    left: int
+    top: int
+    width: int
+    height: int
+    linha: tuple
+
+
 class NfseExtractor:
     """Extração de campos de NFS-e via Tesseract + âncoras (M4).
 
-    Procura termos-chave ("CNPJ", "VALOR TOTAL", ...) e captura os
-    valores adjacentes com regexes tolerantes. Cada campo recebe um
-    índice de confiança baseado na confiança média do OCR na linha
-    usada.
+    Combina busca por termos-chave com regexes tolerantes e, quando
+    disponível, re-OCR posicional (recortes da imagem em tons de
+    cinza) para campos difíceis como o número da nota. Cada campo
+    recebe um índice de confiança baseado na confiança do OCR.
 
     Exemplo:
         >>> extractor = NfseExtractor()
@@ -62,8 +75,12 @@ class NfseExtractor:
         self.config = config
         self.janela = janela_ancora_linhas
 
-    def extract(self, imagem: "str | Path | np.ndarray | Image.Image") -> ExtractionResult:
-        linhas, texto_completo = self._ocr(imagem)
+    def extract(
+        self,
+        imagem: "str | Path | np.ndarray | Image.Image",
+        imagem_cinza: "np.ndarray | None" = None,
+    ) -> ExtractionResult:
+        linhas, texto_completo, palavras = self._ocr(imagem)
         resultado = ExtractionResult()
         resultado.confianca = {campo: 0.0 for campo in ExtractionResult.CAMPOS}
 
@@ -72,9 +89,15 @@ class NfseExtractor:
             linhas, _ANCORAS_RAZAO, "razao_social", resultado.confianca
         )
         resultado.data_emissao = self._extrair_data(linhas, resultado.confianca)
-        resultado.numero_nfse = self._extrair_numero(linhas, resultado.confianca)
-        resultado.valor_total = self._extrair_valor(linhas, _ANCORAS_VALOR_TOTAL, "valor_total", resultado.confianca)
-        resultado.iss = self._extrair_valor(linhas, _ANCORAS_ISS, "iss", resultado.confianca)
+        resultado.numero_nfse = self._extrair_numero(
+            linhas, palavras, imagem_cinza, resultado.confianca
+        )
+        resultado.valor_total = self._extrair_valor(
+            linhas, _ANCORAS_VALOR_TOTAL, "valor_total", resultado.confianca
+        )
+        resultado.iss = self._extrair_iss(
+            linhas, palavras, resultado.confianca
+        )
 
         preenchidos = sum(1 for c in ExtractionResult.CAMPOS if getattr(resultado, c) is not None)
         logger.info(
@@ -85,7 +108,7 @@ class NfseExtractor:
         )
         return resultado
 
-    def _ocr(self, imagem) -> tuple[list[_Linha], str]:
+    def _ocr(self, imagem) -> tuple[list[_Linha], str, list[_Palavra]]:
         try:
             imagem = self._converter(imagem)
             dados = pytesseract.image_to_data(
@@ -101,8 +124,9 @@ class NfseExtractor:
             logger.exception("Falha no OCR")
             raise ExtractionError(f"Falha no OCR: {exc}") from exc
         linhas = self._agrupar_linhas(dados)
-        logger.debug("OCR produziu %d linhas", len(linhas))
-        return linhas, texto_completo
+        palavras = self._coletar_palavras(dados)
+        logger.debug("OCR produziu %d linhas e %d palavras", len(linhas), len(palavras))
+        return linhas, texto_completo, palavras
 
     @staticmethod
     def _converter(imagem):
@@ -145,6 +169,31 @@ class NfseExtractor:
         ]
         linhas.sort(key=lambda l: l.topo)
         return linhas
+
+    @staticmethod
+    def _coletar_palavras(dados: dict) -> list[_Palavra]:
+        palavras = []
+        for i in range(len(dados["text"])):
+            texto = (dados["text"][i] or "").strip()
+            conf = float(dados["conf"][i])
+            if not texto or conf < 0:
+                continue
+            palavras.append(
+                _Palavra(
+                    texto=texto,
+                    confianca=conf / 100.0,
+                    left=dados["left"][i],
+                    top=dados["top"][i],
+                    width=dados["width"][i],
+                    height=dados["height"][i],
+                    linha=(
+                        dados["block_num"][i],
+                        dados["par_num"][i],
+                        dados["line_num"][i],
+                    ),
+                )
+            )
+        return palavras
 
     @staticmethod
     def parse_money(valor: str) -> float | None:
@@ -207,40 +256,98 @@ class NfseExtractor:
         return False
 
     def _extrair_data(self, linhas, confiancas: dict) -> str | None:
-        match = _DATA_RE.search(" ".join(l.texto for l in linhas))
-        if not match:
-            logger.debug("Data não encontrada.")
-            return None
-        idx = self._indice_da_ancora(linhas, _ANCORAS_DATA)
-        linha = linhas[idx] if idx is not None else next(
-            (l for l in linhas if _DATA_RE.search(l.texto)), None
-        )
-        conf = linha.confianca if linha else 0.7
-        confiancas["data_emissao"] = round(min(0.95, conf), 2)
-        logger.debug("Data extraída: %s", match.group(0))
-        return match.group(0)
+        for match in _DATA_RE.finditer(" ".join(l.texto for l in linhas)):
+            bruto = match.group(0)
+            dia, mes, ano = bruto.split("/")
+            normalizada = f"{int(dia):02d}/{int(mes):02d}/{ano}"
+            idx = self._indice_da_ancora(linhas, _ANCORAS_DATA)
+            linha = linhas[idx] if idx is not None else next(
+                (l for l in linhas if bruto in l.texto), None
+            )
+            conf = linha.confianca if linha else 0.7
+            confiancas["data_emissao"] = round(min(0.95, conf), 2)
+            logger.debug("Data extraída: %s -> %s", bruto, normalizada)
+            return normalizada
+        logger.debug("Data não encontrada.")
+        return None
 
-    def _extrair_numero(self, linhas, confiancas: dict) -> str | None:
+    def _extrair_numero(
+        self, linhas, palavras, imagem_cinza, confiancas: dict
+    ) -> str | None:
         idx = self._indice_da_ancora(linhas, _ANCORAS_NUMERO)
         janela = [linhas[idx].texto] if idx is not None else []
         if idx is not None:
             janela += [l.texto for l in linhas[idx + 1: idx + 1 + self.janela]]
         for texto in janela:
-            match = _NUMERO_RE.search(texto)
-            if match:
+            candidato = self._candidato_numero(texto, excluir_datas=True)
+            if candidato:
                 confiancas["numero_nfse"] = round(
                     (linhas[idx].confianca if idx is not None else 0.7), 2
                 )
-                logger.debug("Número extraído (âncora): %s/%s", match.group(1), match.group(2))
-                return f"{match.group(1)}/{match.group(2)}"
-        match = _NUMERO_RE.search(" ".join(l.texto for l in linhas))
-        if match:
-            numero, ano = match.group(1), match.group(2)
-            if len(ano) == 4 and 1900 <= int(ano) <= 2100:
+                logger.debug("Número extraído (âncora): %s", candidato)
+                return candidato
+        if imagem_cinza is not None:
+            candidato = self._reocr_numero(palavras, imagem_cinza, confiancas)
+            if candidato:
+                return candidato
+        for linha in linhas:
+            candidato = self._candidato_numero(linha.texto, excluir_datas=True)
+            if candidato:
                 confiancas["numero_nfse"] = 0.7
-                logger.debug("Número extraído (texto completo): %s/%s", numero, ano)
-                return f"{numero}/{ano}"
+                logger.debug("Número extraído (texto completo): %s", candidato)
+                return candidato
         logger.debug("Número da NFS-e não encontrado.")
+        return None
+
+    @staticmethod
+    def _candidato_numero(texto: str, excluir_datas: bool = False) -> str | None:
+        padrao = re.compile(r"(?<![\d.])(\d{1,9})\s*/\s*(\d{2,9})(?![\d])")
+        match = padrao.search(texto)
+        if not match:
+            return None
+        numero, sufixo = match.group(1), match.group(2)
+        if excluir_datas:
+            trecho = match.group(0)
+            for data_match in _DATA_RE.finditer(texto):
+                if data_match.group(0) in trecho or trecho in data_match.group(0):
+                    return None
+            if len(sufixo) == 4 and 1900 <= int(sufixo) <= 2100:
+                return None
+            if len(sufixo) < 3:
+                return None
+        return f"{numero}/{sufixo}"
+
+    def _reocr_numero(self, palavras, imagem_cinza, confiancas: dict) -> str | None:
+        """Segunda passada: recorte ao redor da âncora 'Número da Nota'."""
+        for palavra in palavras:
+            if not re.fullmatch(r"N[úuÚÚ]|N[º°]|NUMERO|NÚMERO", palavra.texto):
+                continue
+            left = max(0, palavra.left - 40)
+            top = max(0, palavra.top - int(palavra.height * 0.6))
+            right = palavra.left + int(palavra.width * 12)
+            bottom = palavra.top + int(palavra.height * 4.0)
+            altura_img, largura_img = imagem_cinza.shape
+            recorte = imagem_cinza[top: min(bottom, altura_img), left: min(right, largura_img)]
+            if recorte.size == 0:
+                continue
+            pilha = Image.fromarray(recorte)
+            pilha = pilha.resize((pilha.width * 2, pilha.height * 2), Image.LANCZOS)
+            try:
+                texto = pytesseract.image_to_string(
+                    pilha, lang=self.lang, config="--oem 3 --psm 6"
+                )
+            except Exception:
+                logger.exception("Falha no re-OCR do número da nota")
+                continue
+            match = _NUMERO_RE.search(texto) or _NUMERO_SO_RE.search(texto)
+            if not match:
+                continue
+            bruto = match.group(0).strip("| ")
+            digits = re.sub(r"\D", "", bruto)
+            if len(digits) >= 5:
+                confiancas["numero_nfse"] = 0.75
+                logger.debug("Número extraído (re-OCR posicional): %s", bruto)
+                return bruto
         return None
 
     def _extrair_valor(self, linhas, ancoras, campo: str, confiancas: dict) -> float | None:
@@ -255,6 +362,44 @@ class NfseExtractor:
                     return valor
         logger.debug("%s: âncora ou valor não encontrado.", campo)
         return None
+
+    def _extrair_iss(self, linhas, palavras, confiancas: dict) -> float | None:
+        alvo = self._valor_posicional(palavras, _ANCORA_ISS_RE, janela_linhas=2.5)
+        if alvo is not None:
+            valor, conf = alvo
+            confiancas["iss"] = round(conf, 2)
+            logger.debug("ISS extraído (posicional): %.2f (conf %.2f)", valor, conf)
+            return valor
+        return self._extrair_valor(linhas, _ANCORAS_ISS, "iss", confiancas)
+
+    def _valor_posicional(
+        self, palavras, padrao_ancora: re.Pattern, janela_linhas: float = 2.5
+    ) -> "tuple[float, float] | None":
+        """Busca um valor monetário na coluna abaixo da âncora encontrada."""
+        ancora = next((p for p in palavras if padrao_ancora.search(p.texto)), None)
+        if ancora is None:
+            return None
+        altura_media = ancora.height or 20
+        limite_topo = ancora.top + altura_media * janela_linhas
+        x_esq = ancora.left - ancora.width * 2.0
+        x_dir = ancora.left + ancora.width * 6.0
+        candidatos = []
+        for palavra in palavras:
+            if palavra.top <= ancora.top:
+                continue
+            if palavra.top > limite_topo:
+                continue
+            centro = palavra.left + palavra.width / 2
+            if centro < x_esq or centro > x_dir:
+                continue
+            valor = self.parse_money(palavra.texto)
+            if valor is not None:
+                candidatos.append((palavra.top, valor, palavra.confianca))
+        if not candidatos:
+            return None
+        candidatos.sort()
+        _, valor, conf = candidatos[0]
+        return valor, conf
 
     def _indice_da_ancora(self, linhas, ancoras) -> int | None:
         for ancora in ancoras:

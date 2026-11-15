@@ -128,7 +128,9 @@ class NfsePipeline:
 
         progresso and progresso("Extraindo dados")
         try:
-            dados = self.extractor.extract(processada.ocr)
+            dados = self.extractor.extract(
+                processada.ocr, imagem_cinza=processada.grayscale
+            )
         except ExtractionError as exc:
             return PipelineResult(
                 status=Status.EXTRACAO_FALHOU,
