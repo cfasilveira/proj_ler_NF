@@ -1,0 +1,29 @@
+# Dados locais
+data/
+downloads/
+*.sqlite
+*.sqlite3
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+
+# Documentos e arquivos temporários do editor
+*.docx
+*.docx#
+.~lock.*
+*.swp
+.idea/
+.vscode/
+
+# Imagens de usuário
+*.png
+*.jpg
+*.jpeg
+!tests/fixtures/*

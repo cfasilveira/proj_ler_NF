@@ -1,0 +1,34 @@
+[project]
+name = "ler-nf"
+version = "0.1.0"
+description = "Leitor local de NFS-e a partir de imagens: validação, identificação de layout via pHash, extração OCR e exportação."
+readme = "README.md"
+requires-python = ">=3.13"
+authors = [{ name = "cfasilveira" }]
+license = { text = "MIT" }
+dependencies = [
+    "imageguard",
+    "safeuploads>=0.1.0",
+    "imagehash",
+    "tablib[xlsx]",
+    "customtkinter",
+    "pytesseract",
+    "Pillow",
+    "opencv-python-headless",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ler_nf"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
